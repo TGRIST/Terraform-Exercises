@@ -1,0 +1,272 @@
+##################################################################################
+# VARIABLES
+##################################################################################
+
+variable "aws_access_key" {}
+variable "aws_secret_key" {}
+variable "private_key_path" {}
+variable "key_name" {
+  default = "Terraform"
+}
+variable "network_address_space" {
+  default = "10.1.0.0/16"
+}
+variable "subnet1_address_space" {
+  default = "10.1.0.0/24"
+}
+variable "subnet2_address_space" {
+  default = "10.1.1.0/24"
+}
+variable "billing_code_tag" {}
+variable "environment_tag" {}
+
+##################################################################################
+# PROVIDERS
+##################################################################################
+
+provider "aws" {
+  access_key = "${var.aws_access_key}"
+  secret_key = "${var.aws_secret_key}"
+  region     = "eu-west-2"
+}
+
+##################################################################################
+# DATA
+##################################################################################
+
+data "aws_availability_zones" "available" {}
+
+##################################################################################
+# RESOURCES
+##################################################################################
+
+# NETWORKING #
+resource "aws_vpc" "mod2vpc" {
+  cidr_block = "${var.network_address_space}"
+
+  tags {
+    Name = "${var.environment_tag}-mod2vpc"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+
+}
+
+resource "aws_internet_gateway" "mod2igw" {
+  vpc_id = "${aws_vpc.mod2vpc.id}"
+
+  tags {
+    Name = "${var.environment_tag}-mod2igw"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+
+}
+
+resource "aws_subnet" "mod2subnet1" {
+  cidr_block        = "${var.subnet1_address_space}"
+  vpc_id            = "${aws_vpc.mod2vpc.id}"
+  map_public_ip_on_launch = "true"
+  availability_zone = "${data.aws_availability_zones.available.names[0]}"
+ 
+  tags {
+    Name = "${var.environment_tag}-mod2subnet1"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+
+}
+
+resource "aws_subnet" "mod2subnet2" {
+  cidr_block        = "${var.subnet2_address_space}"
+  vpc_id            = "${aws_vpc.mod2vpc.id}"
+  map_public_ip_on_launch = "true"
+  availability_zone = "${data.aws_availability_zones.available.names[1]}"
+
+  tags {
+    Name = "${var.environment_tag}-mod2subnet2"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+
+}
+
+# ROUTING #
+resource "aws_route_table" "mod2rtb" {
+  vpc_id = "${aws_vpc.mod2vpc.id}"
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = "${aws_internet_gateway.mod2igw.id}"
+  }
+   
+  tags {
+    Name = "${var.environment_tag}-mod2rtb"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  } 
+
+}
+
+resource "aws_route_table_association" "mod2rta-subnet1" {
+  subnet_id      = "${aws_subnet.mod2subnet1.id}"
+  route_table_id = "${aws_route_table.mod2rtb.id}"
+}
+
+resource "aws_route_table_association" "mod2rta-subnet2" {
+  subnet_id      = "${aws_subnet.mod2subnet2.id}"
+  route_table_id = "${aws_route_table.mod2rtb.id}"
+}
+
+# SECURITY GROUPS #
+resource "aws_security_group" "mod2elb-sg" {
+  name        = "mod2nginx_elb_sg"
+  vpc_id      = "${aws_vpc.mod2vpc.id}"
+
+  #Allow HTTP from anywhere
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  #allow all outbound
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags {
+    Name = "${var.environment_tag}-mod2elb-sg"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+
+}
+
+# Nginx security group 
+resource "aws_security_group" "mod2nginx-sg" {
+  name        = "mod2nginx_sg"
+  vpc_id      = "${aws_vpc.mod2vpc.id}"
+  
+
+  # SSH access from anywhere
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # HTTP access from the VPC
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["${var.network_address_space}"]
+  }
+
+  # outbound internet access
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags {
+    Name = "${var.environment_tag}-mod2nginx-sg"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+
+}
+
+# LOAD BALANCER #
+resource "aws_elb" "mod2web" {
+  name = "mod2nginx-elb"
+
+  subnets         = ["${aws_subnet.mod2subnet1.id}", "${aws_subnet.mod2subnet2.id}"]
+  security_groups = ["${aws_security_group.mod2elb-sg.id}"]
+  instances       = ["${aws_instance.mod2nginx1.id}", "${aws_instance.mod2nginx2.id}"]
+
+  listener {
+    instance_port     = 80
+    instance_protocol = "http"
+    lb_port           = 80
+    lb_protocol       = "http"
+  }
+
+  tags {
+    Name = "${var.environment_tag}-mod2nginx-elb"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+
+}
+
+# INSTANCES #
+resource "aws_instance" "mod2nginx1" {
+  ami           = "ami-a36f8dc4"
+  instance_type = "t2.micro"
+  subnet_id     = "${aws_subnet.mod2subnet1.id}"
+  vpc_security_group_ids = ["${aws_security_group.mod2nginx-sg.id}"]
+  key_name        = "${var.key_name}"
+
+  connection {
+    user        = "ec2-user"
+    private_key = "${file(var.private_key_path)}"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum install nginx -y",
+      "sudo service nginx start",
+      "echo '<html><head><title>Blue Team Server</title></head><body style=\"background-color:#1F778D\"><p style=\"text-align: center;\"><span style=\"color:#FFFFFF;\"><span style=\"font-size:28px;\">Blue Team</span></span></p></body></html>' | sudo tee /usr/share/nginx/html/index.html"
+    ]
+  }
+  
+  tags {
+    Name = "${var.environment_tag}-mod2nginx1"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+}
+
+resource "aws_instance" "mod2nginx2" {
+  ami           = "ami-a36f8dc4"
+  instance_type = "t2.micro"
+  subnet_id     = "${aws_subnet.mod2subnet2.id}"
+  vpc_security_group_ids = ["${aws_security_group.mod2nginx-sg.id}"]
+  key_name        = "${var.key_name}"
+
+  connection {
+    user        = "ec2-user"
+    private_key = "${file(var.private_key_path)}"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo yum install nginx -y",
+      "sudo service nginx start",
+      "echo '<html><head><title>Green Team Server</title></head><body style=\"background-color:#77A032\"><p style=\"text-align: center;\"><span style=\"color:#FFFFFF;\"><span style=\"font-size:28px;\">Green Away Kit</span></span></p></body></html>' | sudo tee /usr/share/nginx/html/index.html"
+    ]
+  }
+
+  tags {
+    Name = "${var.environment_tag}-mod2nginx2"
+    BillingCode        = "${var.billing_code_tag}"
+    Environment = "${var.environment_tag}"
+  }
+}
+
+##################################################################################
+# OUTPUT
+##################################################################################
+
+output "aws_elb_public_dns" {
+    value = "${aws_elb.mod2web.dns_name}"
+}
